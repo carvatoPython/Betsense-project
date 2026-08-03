@@ -6,7 +6,7 @@ Cambia a PostgreSQL en producción.
 
 from sqlalchemy import (
     create_engine, Column, Integer, Float, String,
-    DateTime, Text, Boolean, ForeignKey, UniqueConstraint
+    DateTime, Text, Boolean, ForeignKey, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime
@@ -260,6 +260,72 @@ class HistorialCuotas(Base):
 
 
 # ══════════════════════════════════════════════════════════════
+# MODELOS DEL BACKTESTER CIEGO (auto-calibración interna)
+# ══════════════════════════════════════════════════════════════
+
+class PartidoHistorico(Base):
+    """
+    Caché local de partidos FINISHED, traídos en bloque vía
+    /competitions/{liga}/matches?season=X (1 request = 1 temporada completa).
+    Evita re-pedir a la API en cada corrida del backtester.
+    """
+    __tablename__ = "partidos_historicos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(Integer, unique=True, nullable=False)  # id de football-data.org
+    liga = Column(String(10), nullable=False)
+    season = Column(String(6), nullable=False)
+    fecha = Column(DateTime, nullable=False)
+    home_id = Column(Integer, nullable=False)
+    away_id = Column(Integer, nullable=False)
+    home_name = Column(String(100))
+    away_name = Column(String(100))
+    gh = Column(Integer, nullable=False)
+    ga = Column(Integer, nullable=False)
+    creado = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_partidohist_fecha", "fecha"),
+        Index("ix_partidohist_liga_season", "liga", "season"),
+        Index("ix_partidohist_home", "home_id"),
+        Index("ix_partidohist_away", "away_id"),
+    )
+
+
+class BacktestRun(Base):
+    """
+    Historial de corridas del backtester ciego: cada combinación de
+    parámetros probada en el grid search, con su RPS/Brier promedio.
+    """
+    __tablename__ = "backtest_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fecha = Column(DateTime, default=datetime.utcnow)
+    decay_halflife_dias = Column(Float, nullable=False)
+    maf_peso = Column(Float, nullable=False)
+    n_partidos = Column(Integer)
+    rps_promedio = Column(Float)
+    brier_promedio = Column(Float)
+    es_ganador = Column(Boolean, default=False)  # True si fue la mejor combo de esa corrida
+
+
+class ParametrosActivos(Base):
+    """
+    Configuración vigente que betAI.py lee en producción. Fila única
+    (id=1), actualizada por el auto-tune del backtester cuando encuentra
+    una combinación mejor que la actual.
+    """
+    __tablename__ = "parametros_activos"
+
+    id = Column(Integer, primary_key=True, default=1)
+    decay_halflife_dias = Column(Float, default=150.0, nullable=False)
+    maf_peso = Column(Float, default=1.0, nullable=False)
+    rps_promedio_calibracion = Column(Float, nullable=True)
+    n_partidos_calibracion = Column(Integer, nullable=True)
+    actualizado = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ══════════════════════════════════════════════════════════════
 # FUNCIONES DE ACCESO
 # ══════════════════════════════════════════════════════════════
 
@@ -454,6 +520,157 @@ def actualizar_resultado(prediccion_id: int, goles_home: int, goles_away: int) -
         session.rollback()
         print(f"❌ Error actualizando resultado: {e}")
         return None
+    finally:
+        session.close()
+
+
+# ══════════════════════════════════════════════════════════════
+# FUNCIONES — BACKTESTER CIEGO / CALIBRACIÓN
+# ══════════════════════════════════════════════════════════════
+
+def guardar_partidos_historicos(partidos: list) -> int:
+    """
+    Upsert en bloque de partidos históricos (formato ya normalizado,
+    ver backtest_engine.normalizar_partido_api). Devuelve cuántos
+    partidos nuevos insertó (los ya existentes se ignoran).
+    """
+    session = Session()
+    insertados = 0
+    try:
+        existentes = {
+            mid for (mid,) in session.query(PartidoHistorico.match_id)
+            .filter(PartidoHistorico.match_id.in_([p["match_id"] for p in partidos]))
+            .all()
+        } if partidos else set()
+
+        for p in partidos:
+            if p["match_id"] in existentes:
+                continue
+            session.add(PartidoHistorico(**p))
+            insertados += 1
+        session.commit()
+        return insertados
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error guardando partidos históricos: {e}")
+        return insertados
+    finally:
+        session.close()
+
+
+def obtener_partidos_historicos(liga: str = None, seasons: list = None) -> list:
+    """
+    Trae partidos de la caché local para armar el pool de backtest.
+    Filtra por liga/temporadas si se especifican. Devuelve dicts listos
+    para usar (mismo shape que normalizar() en betAI.py: homeId/awayId/gH/gA/date).
+    """
+    session = Session()
+    try:
+        q = session.query(PartidoHistorico)
+        if liga:
+            q = q.filter(PartidoHistorico.liga == liga)
+        if seasons:
+            q = q.filter(PartidoHistorico.season.in_([str(s) for s in seasons]))
+        rows = q.order_by(PartidoHistorico.fecha.asc()).all()
+        return [{
+            "matchId": r.match_id,
+            "homeId": r.home_id,
+            "awayId": r.away_id,
+            "homeName": r.home_name,
+            "awayName": r.away_name,
+            "gH": r.gh,
+            "gA": r.ga,
+            "date": r.fecha,
+            "liga": r.liga,
+            "season": r.season,
+        } for r in rows]
+    finally:
+        session.close()
+
+
+def obtener_parametros_activos() -> dict:
+    """
+    Lee la config vigente (decay half-life, peso MAF) que betAI.py debe
+    usar en producción. Si no existe todavía, crea la fila con defaults.
+    """
+    session = Session()
+    try:
+        params = session.get(ParametrosActivos, 1)
+        if not params:
+            params = ParametrosActivos(id=1, decay_halflife_dias=150.0, maf_peso=1.0)
+            session.add(params)
+            session.commit()
+        return {
+            "decay_halflife_dias": params.decay_halflife_dias,
+            "maf_peso": params.maf_peso,
+            "rps_promedio_calibracion": params.rps_promedio_calibracion,
+            "n_partidos_calibracion": params.n_partidos_calibracion,
+            "actualizado": params.actualizado.isoformat() if params.actualizado else None,
+        }
+    finally:
+        session.close()
+
+
+def guardar_parametros_activos(decay_halflife_dias: float, maf_peso: float,
+                                 rps_promedio: float = None, n_partidos: int = None) -> None:
+    """Actualiza la config vigente (llamado por el auto-tune al encontrar una mejor combo)."""
+    session = Session()
+    try:
+        params = session.get(ParametrosActivos, 1)
+        if not params:
+            params = ParametrosActivos(id=1)
+            session.add(params)
+        params.decay_halflife_dias = decay_halflife_dias
+        params.maf_peso = maf_peso
+        params.rps_promedio_calibracion = rps_promedio
+        params.n_partidos_calibracion = n_partidos
+        session.commit()
+        print(f"🎯 Parámetros activos actualizados: half-life={decay_halflife_dias}d, "
+              f"maf_peso={maf_peso}, RPS={rps_promedio}")
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error guardando parámetros activos: {e}")
+    finally:
+        session.close()
+
+
+def guardar_backtest_run(decay_halflife_dias: float, maf_peso: float, n_partidos: int,
+                           rps_promedio: float, brier_promedio: float, es_ganador: bool = False) -> None:
+    """Loguea una combinación probada durante el grid search del auto-tune."""
+    session = Session()
+    try:
+        session.add(BacktestRun(
+            decay_halflife_dias=decay_halflife_dias,
+            maf_peso=maf_peso,
+            n_partidos=n_partidos,
+            rps_promedio=rps_promedio,
+            brier_promedio=brier_promedio,
+            es_ganador=es_ganador,
+        ))
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error guardando backtest run: {e}")
+    finally:
+        session.close()
+
+
+def obtener_historial_backtests(limit: int = 50) -> list:
+    """Últimas corridas de auto-tune, para diagnóstico interno (no va al HTML del usuario)."""
+    session = Session()
+    try:
+        rows = (session.query(BacktestRun)
+                .order_by(BacktestRun.fecha.desc())
+                .limit(limit).all())
+        return [{
+            "fecha": r.fecha.strftime("%Y-%m-%d %H:%M"),
+            "decay_halflife_dias": r.decay_halflife_dias,
+            "maf_peso": r.maf_peso,
+            "n_partidos": r.n_partidos,
+            "rps_promedio": r.rps_promedio,
+            "brier_promedio": r.brier_promedio,
+            "es_ganador": r.es_ganador,
+        } for r in rows]
     finally:
         session.close()
 

@@ -1,4 +1,5 @@
 import sys, os, re, math, random
+import time as t
 from datetime import date, datetime, timedelta
 
 from flask import Flask, jsonify, send_from_directory, request
@@ -7,7 +8,14 @@ import requests
 import numpy as np
 from openai import OpenAI
 
-from database import init_db, guardar_prediccion, obtener_historial, obtener_estadisticas_modelo
+from database import (
+    init_db, guardar_prediccion, obtener_historial, obtener_estadisticas_modelo,
+)
+from model_core import (
+    get_parametros_activos, peso_decay, poisson_pmf, calc_stats, calc_lambda,
+    build_matrix, calc_probs, best_score, get_form, get_h2h, over_prob, btts_prob,
+    _zona_equipo, calc_maf, aplicar_maf,
+)
 from auth import auth_bp, init_auth_db
 from indicators import analyze_all_indicators, analyze_tennis_indicators
 from rangos import rangos_bp, cerrar_pick
@@ -64,20 +72,37 @@ TABLE_TENNIS_MATCHES = {
 }
 
 
-def poisson_pmf(k, lam):
-    """PMF de Poisson sin depender de scipy."""
-    if lam < 0:
-        return 0.0
-    k = int(k)
-    if k < 0:
-        return 0.0
-    return math.exp(-lam) * (lam ** k) / math.factorial(k)
-
 def temporada_actual():
     hoy = date.today()
     return hoy.year if hoy.month >= 8 else hoy.year - 1
 
 SEASON = str(temporada_actual())
+SEASON_ANTERIOR = str(int(SEASON) - 1)
+
+
+def fetch_pool_multitemporada(team_id: int, liga: str) -> list:
+    """
+    Reemplazo de "solo temporada actual": trae temporada actual + anterior
+    del mismo equipo/liga y devuelve el pool combinado normalizado. El peso
+    por antigüedad (peso_decay) se aplica después, en calc_lambda_decay/get_h2h,
+    así que acá simplemente juntamos los partidos disponibles.
+    """
+    pool = []
+    for season in (SEASON, SEASON_ANTERIOR):
+        try:
+            r = fetch(f"/teams/{team_id}/matches?competitions={liga}&season={season}&status=FINISHED")
+            pool.extend(normalizar(r.get("matches", [])))
+        except Exception as e:
+            print(f"⚠️  No se pudo traer temporada {season} para equipo {team_id}: {e}")
+    # Si la liga nacional no trae nada (ej. copas/CL con pocos partidos), completar sin filtro de competición
+    if not pool:
+        for season in (SEASON, SEASON_ANTERIOR):
+            try:
+                r = fetch(f"/teams/{team_id}/matches?season={season}&status=FINISHED&limit=20")
+                pool.extend(normalizar(r.get("matches", [])))
+            except Exception as e:
+                print(f"⚠️  No se pudo traer fallback temporada {season} para equipo {team_id}: {e}")
+    return pool
 
 def resolve_liga_code(liga: str) -> str:
     liga = (liga or "PL").upper()
@@ -395,101 +420,6 @@ def normalizar(matches):
     return result
 
 # ── ESTADÍSTICAS ─────────────────────────────────────────────
-def calc_stats(partidos, team_id):
-    G=E=P=GF=GC=0
-    for p in partidos:
-        loc = p["homeId"] == team_id
-        gf  = p["gH"] if loc else p["gA"]
-        gc  = p["gA"] if loc else p["gH"]
-        GF += gf; GC += gc
-        if   gf > gc: G += 1
-        elif gf == gc: E += 1
-        else:          P += 1
-    T = G+E+P or 1
-    over25 = sum(1 for p in partidos if p["gH"]+p["gA"] > 2.5)
-    under25= sum(1 for p in partidos if p["gH"]+p["gA"] < 2.5)
-    btts   = sum(1 for p in partidos if p["gH"]>0 and p["gA"]>0)
-    cs     = sum(1 for p in partidos if (p["gA"] if p["homeId"]==team_id else p["gH"])==0)
-    return {
-        "G": G, "E": E, "P": P, "T": T,
-        "GF": GF, "GC": GC,
-        "pgf": round(GF/T, 2),
-        "pgc": round(GC/T, 2),
-        "winPct":  round(G/T*100, 1),
-        "over25":  round(over25/T*100, 1),
-        "under25": round(under25/T*100, 1),
-        "btts":    round(btts/T*100, 1),
-        "cs":      round(cs/T*100, 1),
-    }
-
-def calc_lambda(partidos, team_id, as_local, scored=True):
-    """
-    scored=True  → goles ANOTADOS por el equipo
-    scored=False → goles RECIBIDOS por el equipo
-    as_local=True  → solo partidos jugados en casa
-    as_local=False → solo partidos jugados de visitante
-    """
-    goles = []
-    for p in partidos:
-        es_local = p["homeId"] == team_id
-        if as_local and not es_local:
-            continue
-        if not as_local and es_local:
-            continue
-        if scored:
-            goles.append(p["gH"] if es_local else p["gA"])
-        else:
-            goles.append(p["gA"] if es_local else p["gH"])
-    return round(float(np.mean(goles)), 3) if goles else 1.0
-
-def build_matrix(lA, lB, mx=7):
-    m = []
-    for i in range(mx+1):
-        row = []
-        for j in range(mx+1):
-            row.append(float(poisson_pmf(i, lA) * poisson_pmf(j, lB)))
-        m.append(row)
-    return m
-
-def calc_probs(matrix):
-    pA = pE = pB = 0.0
-    for i, row in enumerate(matrix):
-        for j, v in enumerate(row):
-            if   i > j: pA += v
-            elif i == j: pE += v
-            else:        pB += v
-    return round(pA,4), round(pE,4), round(pB,4)
-
-def best_score(matrix):
-    best_v, bi, bj = 0, 0, 0
-    for i, row in enumerate(matrix):
-        for j, v in enumerate(row):
-            if v > best_v:
-                best_v, bi, bj = v, i, j
-    return bi, bj, round(best_v, 4)
-
-def get_form(partidos, team_id):
-    sorted_p = sorted(partidos, key=lambda x: x["date"], reverse=True)[:5]
-    result = []
-    for p in reversed(sorted_p):
-        gf = p["gH"] if p["homeId"]==team_id else p["gA"]
-        gc = p["gA"] if p["homeId"]==team_id else p["gH"]
-        result.append("W" if gf>gc else "D" if gf==gc else "L")
-    return result
-
-def get_h2h(partidos_a, id_a, id_b):
-    h2h = [p for p in partidos_a if p["homeId"]==id_b or p["awayId"]==id_b]
-    return sorted(h2h, key=lambda x: x["date"], reverse=True)[:5]
-
-def over_prob(matrix, threshold):
-    p = sum(v for i,row in enumerate(matrix) for j,v in enumerate(row) if i+j > threshold)
-    return round(p*100, 1)
-
-def btts_prob(lA, lB):
-    p0A = float(poisson_pmf(0, lA))
-    p0B = float(poisson_pmf(0, lB))
-    return round((1-p0A)*(1-p0B)*100, 1)
-
 def betsense_score(prA, prE, prB, fA, fB, h2h_list, id_a, sA, sB,
                    maf_home=None, maf_away=None):
     fp = lambda f: sum(3 if r=="W" else 1 if r=="D" else 0 for r in f)
@@ -568,242 +498,6 @@ def betsense_score(prA, prE, prB, fA, fB, h2h_list, id_a, sA, sB,
 #
 # MAF final = producto ponderado de los 4 factores, clampeado a [0.70, 1.40]
 # ══════════════════════════════════════════════════════════════════════
-
-def _zona_equipo(pos: int, total: int) -> str:
-    """Clasifica la zona de tabla de un equipo."""
-    if total <= 0:
-        return "media"
-    pct = pos / total
-    # Zona campeón: top 1
-    if pos == 1:
-        return "campeon"
-    # Zona Champions/Europa top: top 20% excepto 1
-    if pct <= 0.20:
-        return "europa_top"
-    # Zona Europa (p.ej. top 40%)
-    if pct <= 0.40:
-        return "europa"
-    # Zona descenso: últimos 3 equipos (bottom 15%)
-    if pct >= 0.85:
-        return "descenso"
-    # Zona playoff/descenso directo: últimos 6 equipos (bottom 30%)
-    if pct >= 0.70:
-        return "descenso_zona"
-    return "media"
-
-
-def calc_maf(
-    st: dict,           # standings del equipo (puede ser None)
-    rival_st: dict,     # standings del rival (puede ser None)
-    forma: list,        # últimos 5 resultados ["W","D","L",...]
-    es_local: bool,     # ¿juega de local?
-) -> dict:
-    """
-    Calcula el MAF para un equipo.
-    Retorna el factor final y el desglose explicativo.
-    """
-
-    # ── Defaults si no hay standings ────────────────────────────
-    if not st:
-        return {
-            "maf": 1.0,
-            "zona": "desconocida",
-            "zona_label": "Sin datos de tabla",
-            "urgencia": 1.0,
-            "gap": 1.0,
-            "racha": 1.0,
-            "alertas": [],
-            "resumen": "Sin datos de posición en tabla para ajuste situacional.",
-            "disponible": False,
-        }
-
-    pos    = st.get("position", 10)
-    pts    = st.get("points", 30)
-    played = st.get("played", 20)
-    total  = st.get("total", 20)
-    zona   = _zona_equipo(pos, total)
-
-    # Partidos restantes estimados (temporada ~38 jornadas para las 5 grandes)
-    jornadas_totales = 38
-    restantes = max(0, jornadas_totales - played)
-
-    # ── 1. ZONA FACTOR ──────────────────────────────────────────
-    # Descenso: el equipo juega con desesperación → sube lambda
-    # Campeón ya ganado: puede relajarse → baja lambda
-    zona_map = {
-        "descenso":      1.28,   # desesperación máxima
-        "descenso_zona": 1.15,   # urgencia alta
-        "europa":        1.05,   # motivación positiva
-        "europa_top":    1.08,   # Champions en juego
-        "campeon":       0.88,   # relajación posible
-        "media":         1.00,   # neutro
-    }
-    zona_labels = {
-        "descenso":      f"Zona de descenso directo (#{pos})",
-        "descenso_zona": f"Zona de playoff descenso (#{pos})",
-        "europa":        f"Zona Europa (#{pos})",
-        "europa_top":    f"Zona Champions (#{pos})",
-        "campeon":       f"Líder / campeón (#{pos})",
-        "media":         f"Zona media (#{pos})",
-    }
-    zona_factor = zona_map.get(zona, 1.0)
-    zona_label  = zona_labels.get(zona, f"Posición #{pos}")
-
-    # ── 2. URGENCIA FACTOR ──────────────────────────────────────
-    # Cuanto menos partidos quedan Y más crítica la situación,
-    # mayor es el factor de urgencia.
-    urgencia = 1.0
-    if restantes <= 5 and zona in ("descenso", "descenso_zona"):
-        # Últimas 5 jornadas en descenso: máxima urgencia
-        urgencia = 1.20
-    elif restantes <= 10 and zona in ("descenso", "descenso_zona"):
-        urgencia = 1.12
-    elif restantes <= 5 and zona in ("europa_top", "europa"):
-        # Últimas jornadas con Europa en juego
-        urgencia = 1.10
-    elif restantes <= 5 and zona == "campeon":
-        # Ya campeón o casi, puede rotar
-        urgencia = 0.90
-
-    # ── 3. GAP FACTOR (diferencia de puntos con el rival) ───────
-    # Si el rival tiene muchos más puntos → el equipo inferior
-    # puede jugar con más presión / nada que perder
-    gap_factor = 1.0
-    if rival_st:
-        rival_pts = rival_st.get("points", pts)
-        rival_pos = rival_st.get("position", pos)
-        diff_pts  = rival_pts - pts  # positivo = rival está por encima
-
-        if diff_pts >= 20:
-            # Gran favorito vs underdog — el underdog puede sorprender
-            gap_factor = 1.12
-        elif diff_pts >= 10:
-            gap_factor = 1.06
-        elif diff_pts <= -20:
-            # El equipo es muy superior: puede bajar la guardia
-            gap_factor = 0.95
-        elif diff_pts <= -10:
-            gap_factor = 0.98
-
-    # ── 4. RACHA FACTOR ─────────────────────────────────────────
-    # Sin ganar mucho tiempo: desesperación → sube
-    # Invicto largo: confianza → sube moderado
-    racha_factor = 1.0
-    if forma:
-        ultimas5 = forma[-5:]
-        wins   = ultimas5.count("W")
-        losses = ultimas5.count("L")
-        draws  = ultimas5.count("D")
-
-        if wins == 0 and losses >= 4:
-            racha_factor = 1.12   # 4-5 derrotas seguidas: desesperación
-        elif wins == 0 and losses >= 3:
-            racha_factor = 1.07   # racha mala
-        elif wins >= 4:
-            racha_factor = 1.06   # racha muy buena: confianza alta
-        elif wins == 5:
-            racha_factor = 1.10   # invicto 5: en llamas
-        elif losses == 0 and draws <= 1:
-            racha_factor = 1.08   # invicto sin empates
-
-    # ── MAF FINAL — promedio ponderado ──────────────────────────
-    # Pesos: zona(40%) + urgencia(25%) + gap(20%) + racha(15%)
-    maf_raw = (
-        zona_factor    * 0.40 +
-        urgencia       * 0.25 +
-        gap_factor     * 0.20 +
-        racha_factor   * 0.15
-    )
-    # Clampear entre 0.70 y 1.40 para evitar distorsiones extremas
-    maf = round(max(0.70, min(1.40, maf_raw)), 3)
-
-    # ── Alertas narrativas ───────────────────────────────────────
-    alertas = []
-
-    if zona == "descenso":
-        alertas.append({
-            "tipo": "critica",
-            "icono": "🚨",
-            "texto": f"Equipo en zona de descenso directo (#{pos}/{total}). Saldrá a ganar a cualquier costo — los modelos estadísticos subestiman su intensidad.",
-        })
-    elif zona == "descenso_zona":
-        alertas.append({
-            "tipo": "warning",
-            "icono": "⚠️",
-            "texto": f"Equipo en zona de playoff de descenso (#{pos}/{total}). Alta presión para conseguir puntos.",
-        })
-
-    if urgencia > 1.10:
-        alertas.append({
-            "tipo": "critica",
-            "icono": "⏰",
-            "texto": f"Solo {restantes} jornadas restantes con la situación comprometida. Urgencia máxima.",
-        })
-    elif urgencia > 1.05:
-        alertas.append({
-            "tipo": "warning",
-            "icono": "⏰",
-            "texto": f"{restantes} jornadas restantes. La presión del calendario aumenta.",
-        })
-
-    if gap_factor > 1.08:
-        diff_abs = abs(rival_st.get("points", pts) - pts) if rival_st else 0
-        alertas.append({
-            "tipo": "info",
-            "icono": "⚡",
-            "texto": f"El rival tiene {diff_abs} puntos más en la tabla. El equipo inferior puede jugar sin presión y sorprender.",
-        })
-
-    if racha_factor >= 1.10:
-        alertas.append({
-            "tipo": "critica",
-            "icono": "📉",
-            "texto": "Racha muy negativa reciente. Desesperación o cambio táctico probable — impredecible.",
-        })
-    elif racha_factor >= 1.06 and forma and forma.count("W") >= 4:
-        alertas.append({
-            "tipo": "positiva",
-            "icono": "🔥",
-            "texto": "Equipo en racha muy positiva — alta confianza y momentum.",
-        })
-
-    if zona == "campeon" and urgencia <= 0.92:
-        alertas.append({
-            "tipo": "info",
-            "icono": "🏆",
-            "texto": "Equipo ya campeón o matemáticamente asegurado. Posible rotación de plantel.",
-        })
-
-    # Resumen en una línea
-    impacto_pct = round((maf - 1.0) * 100, 1)
-    signo = "+" if impacto_pct >= 0 else ""
-    resumen = (
-        f"MAF={maf} ({signo}{impacto_pct}% sobre λ base) — "
-        f"Zona: {zona_label} · Urgencia: x{urgencia} · "
-        f"Gap: x{gap_factor} · Racha: x{racha_factor}"
-    )
-
-    return {
-        "maf":          maf,
-        "disponible":   True,
-        "zona":         zona,
-        "zona_label":   zona_label,
-        "posicion":     pos,
-        "total_equipos": total,
-        "pts":          pts,
-        "restantes":    restantes,
-        "zona_factor":  zona_factor,
-        "urgencia":     urgencia,
-        "gap_factor":   gap_factor,
-        "racha_factor": racha_factor,
-        "alertas":      alertas,
-        "resumen":      resumen,
-    }
-
-
-def aplicar_maf(lambda_base: float, maf: float) -> float:
-    """Aplica el MAF a una lambda Poisson base."""
-    return round(max(0.3, lambda_base * maf), 3)
 
 
 def build_suggestions(prA, prE, prB, sA, sB, mk, po, h2h, fA, fB, maf_home=None, maf_away=None):
@@ -1783,55 +1477,46 @@ def analyze():
     liga     = resolve_liga_code(request.args.get("liga","PL"))
 
     try:
-        # Para Champions (CL): los equipos juegan pocos partidos en la competición.
-        # Completamos el historial con partidos de su liga nacional de la misma temporada.
-        # Para ligas nacionales: solo esa liga.
+        # Pool multi-temporada (actual + anterior) en vez de solo la actual.
+        # El peso por antigüedad se aplica después en calc_lambda vía decay,
+        # así que acá simplemente juntamos todo lo disponible.
         if liga in ("CL", "EL", "EC", "CLI", "WC", "UNL"):
-            # Intentar primero solo CL
-            rA_cl = fetch(f"/teams/{home_id}/matches?competitions={liga}&season={SEASON}&status=FINISHED")
-            rB_cl = fetch(f"/teams/{away_id}/matches?competitions={liga}&season={SEASON}&status=FINISHED")
-            pA_cl = normalizar(rA_cl.get("matches", []))
-            pB_cl = normalizar(rB_cl.get("matches", []))
+            # Competiciones cortas: intentar primero CL en las 2 temporadas
+            pA_cl, pB_cl = [], []
+            for season in (SEASON, SEASON_ANTERIOR):
+                rA_cl = fetch(f"/teams/{home_id}/matches?competitions={liga}&season={season}&status=FINISHED")
+                rB_cl = fetch(f"/teams/{away_id}/matches?competitions={liga}&season={season}&status=FINISHED")
+                pA_cl.extend(normalizar(rA_cl.get("matches", [])))
+                pB_cl.extend(normalizar(rB_cl.get("matches", [])))
 
-            # Si tienen menos de 5 partidos en CL, complementar con liga nacional
-            if len(pA_cl) < 5:
-                rA_all = fetch(f"/teams/{home_id}/matches?season={SEASON}&status=FINISHED&limit=20")
-                pA = normalizar(rA_all.get("matches", []))
-                if not pA:
-                    pA = pA_cl
-            else:
-                pA = pA_cl
-
-            if len(pB_cl) < 5:
-                rB_all = fetch(f"/teams/{away_id}/matches?season={SEASON}&status=FINISHED&limit=20")
-                pB = normalizar(rB_all.get("matches", []))
-                if not pB:
-                    pB = pB_cl
-            else:
-                pB = pB_cl
+            # Si aun así hay pocos partidos en CL, complementar con liga nacional (ambas temporadas)
+            pA = pA_cl if len(pA_cl) >= 5 else (fetch_pool_multitemporada(home_id, liga) or pA_cl)
+            pB = pB_cl if len(pB_cl) >= 5 else (fetch_pool_multitemporada(away_id, liga) or pB_cl)
         else:
-            rA = fetch(f"/teams/{home_id}/matches?competitions={liga}&season={SEASON}&status=FINISHED")
-            rB = fetch(f"/teams/{away_id}/matches?competitions={liga}&season={SEASON}&status=FINISHED")
-            pA = normalizar(rA.get("matches",[]))
-            pB = normalizar(rB.get("matches",[]))
+            pA = fetch_pool_multitemporada(home_id, liga)
+            pB = fetch_pool_multitemporada(away_id, liga)
 
         sA = calc_stats(pA, home_id)
         sB = calc_stats(pB, away_id)
 
         # ── LAMBDA CORRECTO ─────────────────────────────────────────
-        # Goles esperados del LOCAL = promedio de lo que mete en casa
-        #                           + promedio de lo que recibe el visitante fuera
-        #                           / 2  (ajuste conservador)
-        atk_home = calc_lambda(pA, home_id, as_local=True,  scored=True)   # Wolves anota en casa
-        def_away = calc_lambda(pB, away_id, as_local=False, scored=False)  # Aston recibe fuera
-        atk_away = calc_lambda(pB, away_id, as_local=False, scored=True)   # Aston anota fuera
-        def_home = calc_lambda(pA, home_id, as_local=True,  scored=False)  # Wolves recibe en casa
+        # Goles esperados del LOCAL = promedio (ponderado por antigüedad) de
+        # lo que mete en casa + lo que recibe el visitante fuera / 2.
+        # El half-life de decay viene de la calibración vigente del backtester.
+        params = get_parametros_activos()
+        halflife = params.get("decay_halflife_dias", 150.0)
+
+        atk_home = calc_lambda(pA, home_id, as_local=True,  scored=True,  halflife_dias=halflife)  # Wolves anota en casa
+        def_away = calc_lambda(pB, away_id, as_local=False, scored=False, halflife_dias=halflife)  # Aston recibe fuera
+        atk_away = calc_lambda(pB, away_id, as_local=False, scored=True,  halflife_dias=halflife)  # Aston anota fuera
+        def_home = calc_lambda(pA, home_id, as_local=True,  scored=False, halflife_dias=halflife)  # Wolves recibe en casa
 
         lA_base = round((atk_home + def_away) / 2, 3)  # lambda base LOCAL
         lB_base = round((atk_away + def_home) / 2, 3)  # lambda base VISITANTE
 
         fA  = get_form(pA, home_id)
         fB  = get_form(pB, away_id)
+        # h2h ahora busca en el pool de 2 temporadas, no solo la actual
         h2h = get_h2h(pA, home_id, away_id)
 
         # Tabla de posiciones
