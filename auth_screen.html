@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BetSense — Acceder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+    :root {
+      --acc:   #8a2be2;
+      --acc2:  #ff00ff;
+      --acc3:  #00a2ff;
+      --bg:    #07070f;
+      --bg2:   rgba(10,10,30,0.75);
+      --text:  #e0e6ed;
+      --muted: #7a8a9a;
+      --border: rgba(138,43,226,0.35);
+      --input-bg: rgba(12,12,28,0.9);
+    }
+
+    body {
+      font-family: 'Orbitron', monospace;
+      background-color: var(--bg);
+      background-image:
+        linear-gradient(135deg,
+          rgba(10,10,10,0.7) 0%,
+          rgba(26,26,46,0.6) 15%,
+          rgba(22,33,62,0.7) 35%,
+          rgba(10,10,10,0.8) 50%),
+        url('blue-lock.png');
+      background-size: cover, 60%;
+      background-position: center, center;
+      background-repeat: no-repeat, no-repeat;
+      background-attachment: fixed;
+      min-height: 100vh;
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(circle at 25% 25%, rgba(138,43,226,0.12) 0%, transparent 50%),
+        radial-gradient(circle at 75% 75%, rgba(255,0,255,0.08) 0%, transparent 50%),
+        radial-gradient(circle at 50% 50%, rgba(0,162,255,0.05) 0%, transparent 50%);
+      animation: float 15s ease-in-out infinite;
+      pointer-events: none; z-index: 0;
+    }
+
+    @keyframes float {
+      0%,100% { transform: translateY(0) rotate(0deg); opacity:.8; }
+      33%      { transform: translateY(-15px) rotate(1deg); opacity:1; }
+      66%      { transform: translateY(10px) rotate(-1deg); opacity:.9; }
+    }
+
+    /* ── LOGO ── */
+    .logo-wrap {
+      position: relative; z-index: 1;
+      margin-bottom: 2.5rem;
+      text-align: center;
+      animation: slideDown .8s ease-out both;
+    }
+
+    @keyframes slideDown {
+      from { transform: translateY(-30px); opacity:0; }
+      to   { transform: translateY(0);     opacity:1; }
+    }
+
+    .logo {
+      font-size: 2.6rem; font-weight: 900;
+      background: linear-gradient(45deg, #8a2be2, #ff00ff, #00a2ff);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: glow 3s ease-in-out infinite alternate;
+      letter-spacing: 2px;
+    }
+
+    @keyframes glow {
+      from { filter: drop-shadow(0 0 5px rgba(138,43,226,.6)); }
+      to   { filter: drop-shadow(0 0 20px rgba(255,0,255,.9)); }
+    }
+
+    .logo-sub {
+      font-size: .65rem; color: var(--muted);
+      letter-spacing: 4px; margin-top: .3rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── CARD ── */
+    .card {
+      position: relative; z-index: 1;
+      width: 100%; max-width: 440px;
+      background: var(--bg2);
+      border: 1.5px solid var(--border);
+      border-radius: 20px;
+      backdrop-filter: blur(14px);
+      padding: 2.5rem 2.5rem 2rem;
+      box-shadow: 0 0 40px rgba(138,43,226,.15), 0 20px 60px rgba(0,0,0,.5);
+      animation: fadeUp .9s .2s ease-out both;
+    }
+
+    @keyframes fadeUp {
+      from { transform: translateY(30px); opacity:0; }
+      to   { transform: translateY(0);    opacity:1; }
+    }
+
+    /* ── TABS ── */
+    .tabs {
+      display: flex; gap: .5rem;
+      margin-bottom: 2rem;
+      background: rgba(0,0,0,.35);
+      border-radius: 10px; padding: .3rem;
+    }
+
+    .tab-btn {
+      flex: 1; padding: .6rem; border: none; cursor: pointer;
+      font-family: 'Orbitron', monospace; font-size: .65rem;
+      font-weight: 700; letter-spacing: 2px;
+      border-radius: 8px; transition: all .3s ease;
+      background: transparent; color: var(--muted);
+    }
+
+    .tab-btn.active {
+      background: linear-gradient(135deg, rgba(138,43,226,.6), rgba(255,0,255,.3));
+      color: var(--text);
+      box-shadow: 0 0 15px rgba(138,43,226,.3);
+    }
+
+    /* ── FORMULARIOS ── */
+    .form-panel { display: none; }
+    .form-panel.active { display: block; }
+
+    .form-group {
+      margin-bottom: 1.2rem;
+      animation: fadeIn .4s ease both;
+    }
+
+    @keyframes fadeIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+
+    label {
+      display: block;
+      font-size: .58rem; letter-spacing: 2px;
+      color: var(--muted); margin-bottom: .4rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    input, select {
+      width: 100%; padding: .8rem 1rem;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px; color: var(--text);
+      font-family: 'JetBrains Mono', monospace; font-size: .82rem;
+      transition: all .3s ease; outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: rgba(255,0,255,.6);
+      box-shadow: 0 0 15px rgba(138,43,226,.25);
+      background: rgba(18,10,40,.95);
+    }
+
+    input::placeholder { color: #3a4a5a; }
+
+    select option { background: #0f0f20; color: var(--text); }
+
+    /* ── INLINE 2 cols ── */
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+
+    /* ── BOTÓN PRINCIPAL ── */
+    .btn-primary {
+      width: 100%; padding: .9rem;
+      background: linear-gradient(135deg, var(--acc), var(--acc2));
+      border: none; border-radius: 10px; cursor: pointer;
+      font-family: 'Orbitron', monospace; font-size: .72rem;
+      font-weight: 700; letter-spacing: 3px; color: #fff;
+      transition: all .3s ease; position: relative; overflow: hidden;
+      margin-top: .4rem;
+    }
+
+    .btn-primary::before {
+      content: ''; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.15), transparent);
+      transform: translateX(-100%); transition: transform .5s ease;
+    }
+
+    .btn-primary:hover::before { transform: translateX(100%); }
+    .btn-primary:hover { box-shadow: 0 0 25px rgba(138,43,226,.5); transform: translateY(-1px); }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+
+    /* ── DIVIDER ── */
+    .divider {
+      display: flex; align-items: center; gap: 1rem;
+      margin: 1.4rem 0; font-size: .6rem;
+      color: var(--muted); font-family: 'JetBrains Mono', monospace; letter-spacing:2px;
+    }
+
+    .divider::before, .divider::after {
+      content:''; flex:1;
+      height: 1px; background: var(--border);
+    }
+
+    /* ── BTN GOOGLE ── */
+    .btn-google {
+      width: 100%; padding: .75rem;
+      background: rgba(255,255,255,.05);
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 10px; cursor: pointer;
+      font-family: 'JetBrains Mono', monospace; font-size: .75rem;
+      color: var(--text); display: flex; align-items: center;
+      justify-content: center; gap: .6rem; transition: all .3s ease;
+    }
+
+    .btn-google:hover {
+      background: rgba(255,255,255,.1);
+      border-color: rgba(255,255,255,.3);
+    }
+
+    .google-icon {
+      width: 16px; height: 16px;
+      background: conic-gradient(from 45deg, #EA4335 0deg 90deg, #FBBC05 90deg 180deg, #34A853 180deg 270deg, #4285F4 270deg 360deg);
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ── MENSAJES ── */
+    .msg {
+      padding: .7rem 1rem; border-radius: 8px;
+      font-size: .65rem; letter-spacing: 1px; margin-top: 1rem;
+      font-family: 'JetBrains Mono', monospace; display: none;
+    }
+
+    .msg.error   { background: rgba(255,50,80,.15); border: 1px solid rgba(255,50,80,.4); color: #ff6080; }
+    .msg.success { background: rgba(0,200,100,.12); border: 1px solid rgba(0,200,100,.4); color: #00e088; }
+
+    /* ── CONFIANZA STARS ── */
+    .stars-row {
+      display: flex; gap: .4rem; margin-top: .3rem;
+    }
+
+    .star {
+      width: 28px; height: 28px; border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,.4); cursor: pointer;
+      font-size: .8rem; display: flex; align-items: center;
+      justify-content: center; transition: all .2s ease;
+    }
+
+    .star.lit {
+      background: rgba(138,43,226,.3);
+      border-color: rgba(255,0,255,.6);
+    }
+
+    /* ── LINK ── */
+    .link-small {
+      font-size: .58rem; color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      text-align: center; margin-top: 1.2rem;
+      letter-spacing: 1px;
+    }
+
+    .link-small a {
+      color: var(--acc3); text-decoration: none;
+      transition: color .2s;
+    }
+
+    .link-small a:hover { color: var(--acc2); }
+
+    /* ── SPINNER ── */
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+      display: inline-block; vertical-align: middle; margin-right: .4rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── DEPORTE SELECTOR ── */
+    .deporte-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem;
+    }
+
+    .deporte-btn {
+      padding: .5rem .3rem;
+      border: 1px solid var(--border);
+      border-radius: 8px; background: rgba(0,0,0,.3);
+      cursor: pointer; font-family: 'JetBrains Mono', monospace;
+      font-size: .6rem; color: var(--muted);
+      transition: all .25s ease; text-align: center;
+    }
+
+    .deporte-btn.sel {
+      border-color: rgba(255,0,255,.7);
+      background: rgba(138,43,226,.25);
+      color: var(--text);
+    }
+
+    .deporte-btn span { display:block; font-size:1rem; margin-bottom:.2rem; }
+
+    /* ── FOOTER ── */
+    .footer-note {
+      position: relative; z-index: 1;
+      margin-top: 1.5rem; font-size: .55rem;
+      font-family: 'JetBrains Mono', monospace;
+      color: rgba(120,130,145,.5); letter-spacing: 2px; text-align:center;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Logo -->
+  <div class="logo-wrap">
+    <div class="logo">BetSense</div>
+    <div class="logo-sub">ANÁLISIS DEPORTIVO CON IA</div>
+  </div>
+
+  <!-- Card principal -->
+  <div class="card">
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-login" onclick="switchTab('login')">ACCEDER</button>
+      <button class="tab-btn"        id="tab-reg"   onclick="switchTab('registro')">REGISTRARSE</button>
+    </div>
+
+    <!-- ─── PANEL LOGIN ─────────────────────────────── -->
+    <div class="form-panel active" id="panel-login">
+
+      <div class="form-group">
+        <label>EMAIL O USUARIO</label>
+        <input type="text" id="l-login" placeholder="tu@email.com o username" autocomplete="username">
+      </div>
+
+      <div class="form-group">
+        <label>CONTRASEÑA</label>
+        <input type="password" id="l-pass" placeholder="••••••••" autocomplete="current-password"
+               onkeydown="if(event.key==='Enter') doLogin()">
+      </div>
+
+      <button class="btn-primary" id="btn-login" onclick="doLogin()">ENTRAR</button>
+
+      <div class="divider">O</div>
+
+      <button class="btn-google" onclick="alert('Google OAuth — próximamente')">
+        <span class="google-icon"></span>
+        Continuar con Google
+      </button>
+
+      <div class="msg" id="msg-login"></div>
+
+      <div class="link-small" style="margin-top:1rem">
+        ¿Sin cuenta? <a href="#" onclick="switchTab('registro')">Regístrate gratis</a>
+      </div>
+    </div>
+
+    <!-- ─── PANEL REGISTRO ───────────────────────────── -->
+    <div class="form-panel" id="panel-registro">
+
+      <div class="row-2">
+        <div class="form-group">
+          <label>USERNAME</label>
+          <input type="text" id="r-user" placeholder="tipster123" maxlength="30"
+                 oninput="validarUsername(this)">
+        </div>
+        <div class="form-group">
+          <label>NOMBRE</label>
+          <input type="text" id="r-nombre" placeholder="Tu nombre" maxlength="80">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>EMAIL</label>
+        <input type="email" id="r-email" placeholder="tu@email.com" autocomplete="email">
+      </div>
+
+      <div class="form-group">
+        <label>CONTRASEÑA</label>
+        <input type="password" id="r-pass" placeholder="Mínimo 6 caracteres" autocomplete="new-password">
+      </div>
+
+      <div class="form-group">
+        <label>DEPORTE FAVORITO</label>
+        <div class="deporte-grid" id="deportes-grid">
+          <button class="deporte-btn sel" data-val="football" onclick="selDeporte(this)">
+            <span>⚽</span>Fútbol
+          </button>
+          <button class="deporte-btn" data-val="basketball" onclick="selDeporte(this)">
+            <span>🏀</span>Basket
+          </button>
+          <button class="deporte-btn" data-val="tennis" onclick="selDeporte(this)">
+            <span>🎾</span>Tenis
+          </button>
+          <button class="deporte-btn" data-val="american_football" onclick="selDeporte(this)">
+            <span>🏈</span>NFL
+          </button>
+          <button class="deporte-btn" data-val="baseball" onclick="selDeporte(this)">
+            <span>⚾</span>Béisbol
+          </button>
+          <button class="deporte-btn" data-val="mma" onclick="selDeporte(this)">
+            <span>🥊</span>MMA
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>EQUIPO FAVORITO (OPCIONAL)</label>
+        <input type="text" id="r-equipo" placeholder="Real Madrid, Lakers...">
+      </div>
+
+      <button class="btn-primary" id="btn-reg" onclick="doRegistro()">CREAR CUENTA</button>
+
+      <div class="btn-google" style="margin-top:.8rem;cursor:pointer" onclick="alert('Google OAuth — próximamente')">
+        <span class="google-icon"></span>
+        Registrarse con Google
+      </div>
+
+      <div class="msg" id="msg-reg"></div>
+
+      <div class="link-small">
+        ¿Ya tienes cuenta? <a href="#" onclick="switchTab('login')">Inicia sesión</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer-note">BetSense v2.0 · Red Social de Tipsters</div>
+
+<script>
+  const API = "http://localhost:5000";
+
+  // ── Deporte seleccionado ─────────────────────────────────
+  let deporteSeleccionado = "football";
+
+  function selDeporte(btn) {
+    document.querySelectorAll('.deporte-btn').forEach(b => b.classList.remove('sel'));
+    btn.classList.add('sel');
+    deporteSeleccionado = btn.dataset.val;
+  }
+
+  // ── Tabs ──────────────────────────────────────────────────
+  function switchTab(tab) {
+    document.getElementById('panel-login').classList.toggle('active', tab === 'login');
+    document.getElementById('panel-registro').classList.toggle('active', tab === 'registro');
+    document.getElementById('tab-login').classList.toggle('active', tab === 'login');
+    document.getElementById('tab-reg').classList.toggle('active', tab === 'registro');
+    ocultarMsgs();
+  }
+
+  function ocultarMsgs() {
+    ['msg-login','msg-reg'].forEach(id => {
+      const el = document.getElementById(id);
+      el.style.display = 'none'; el.className = 'msg';
+    });
+  }
+
+  function mostrarMsg(id, texto, tipo) {
+    const el = document.getElementById(id);
+    el.textContent = texto;
+    el.className = `msg ${tipo}`;
+    el.style.display = 'block';
+  }
+
+  // ── Validar username en tiempo real ──────────────────────
+  function validarUsername(input) {
+    const val = input.value.toLowerCase().replace(/[^a-z0-9_.]/g,'');
+    input.value = val;
+  }
+
+  // ── Guardar token y redirigir ─────────────────────────────
+  function guardarSesionYRedirigir(data) {
+    localStorage.setItem('bs_token', data.token);
+    localStorage.setItem('bs_usuario', JSON.stringify(data.usuario));
+    // Redirigir al app principal
+    setTimeout(() => { window.location.href = 'betsense.html'; }, 600);
+  }
+
+  // ── LOGIN ─────────────────────────────────────────────────
+  async function doLogin() {
+    const login_id = document.getElementById('l-login').value.trim();
+    const password = document.getElementById('l-pass').value;
+    const btn      = document.getElementById('btn-login');
+
+    if (!login_id || !password) {
+      mostrarMsg('msg-login', '⚠ Completa todos los campos', 'error');
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> VERIFICANDO...';
+
+    try {
+      const resp = await fetch(`${API}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email_o_username: login_id, password })
+      });
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        mostrarMsg('msg-login', '✗ ' + (data.error || 'Error al iniciar sesión'), 'error');
+        return;
+      }
+
+      mostrarMsg('msg-login', '✓ ¡Bienvenido de vuelta, ' + data.usuario.username + '!', 'success');
+      guardarSesionYRedirigir(data);
+
+    } catch(e) {
+      mostrarMsg('msg-login', '✗ No se pudo conectar con el servidor', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'ENTRAR';
+    }
+  }
+
+  // ── REGISTRO ──────────────────────────────────────────────
+  async function doRegistro() {
+    const username = document.getElementById('r-user').value.trim();
+    const nombre   = document.getElementById('r-nombre').value.trim();
+    const email    = document.getElementById('r-email').value.trim();
+    const password = document.getElementById('r-pass').value;
+    const equipo   = document.getElementById('r-equipo').value.trim();
+    const btn      = document.getElementById('btn-reg');
+
+    if (!username || !email || !password) {
+      mostrarMsg('msg-reg', '⚠ Username, email y contraseña son requeridos', 'error');
+      return;
+    }
+    if (username.length < 3) {
+      mostrarMsg('msg-reg', '⚠ Username mínimo 3 caracteres', 'error');
+      return;
+    }
+    if (password.length < 6) {
+      mostrarMsg('msg-reg', '⚠ Contraseña mínimo 6 caracteres', 'error');
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> CREANDO CUENTA...';
+
+    try {
+      const resp = await fetch(`${API}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username, nombre, email, password,
+          deporte_fav: deporteSeleccionado,
+          equipo_fav: equipo
+        })
+      });
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        mostrarMsg('msg-reg', '✗ ' + (data.error || 'Error al registrarse'), 'error');
+        return;
+      }
+
+      mostrarMsg('msg-reg', '✓ ¡Cuenta creada! Entrando a BetSense...', 'success');
+      guardarSesionYRedirigir(data);
+
+    } catch(e) {
+      mostrarMsg('msg-reg', '✗ No se pudo conectar con el servidor', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = 'CREAR CUENTA';
+    }
+  }
+
+  // ── Verificar si ya hay sesión activa ────────────────────
+  (function checkSesion() {
+    const token = localStorage.getItem('bs_token');
+    if (!token) return;
+    // Verificar con el servidor
+    fetch(`${API}/api/auth/me`, {
+      headers: { 'Authorization': 'Bearer ' + token }
+    }).then(r => {
+      if (r.ok) {
+        window.location.href = 'betsense.html';
+      } else {
+        localStorage.removeItem('bs_token');
+        localStorage.removeItem('bs_usuario');
+      }
+    }).catch(() => {});
+  })();
+</script>
+</body>
+</html>

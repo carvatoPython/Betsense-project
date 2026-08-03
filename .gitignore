@@ -1,0 +1,4 @@
+__pycache__/
+*.exe
+postgresql-17.9-1-windows-x64.exe*.pyc
+.env
