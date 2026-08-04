@@ -757,6 +757,8 @@ LIGA_STATS = {
     "WC":  {"tarjetas": 3.0, "corners":  9.2, "faltas": 20.1, "avg_goles": 2.55},  # Mundial FIFA
     "EC":  {"tarjetas": 2.8, "corners":  9.5, "faltas": 19.8, "avg_goles": 2.45},  # Eurocopa UEFA
     "UNL": {"tarjetas": 2.6, "corners":  9.0, "faltas": 19.2, "avg_goles": 2.35},  # UEFA Nations League
+    "BSA": {"tarjetas": 4.5, "corners":  9.0, "faltas": 25.5, "avg_goles": 2.45},  # Brasileirão
+    "DED": {"tarjetas": 3.0, "corners": 10.0, "faltas": 20.5, "avg_goles": 3.05},  # Eredivisie
 }
 
 # Peso ofensivo por posición (% del total de goles que aporta cada posición)

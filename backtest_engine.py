@@ -53,8 +53,8 @@ API_KEY  = "347e282989fc4fab9569c77f0da86527"
 BASE_URL = "https://api.football-data.org/v4"
 HEADERS  = {"X-Auth-Token": API_KEY}
 
-# Las 5 ligas que ya soporta BetSense
-LIGAS_BACKTEST = ["PL", "PD", "BL1", "SA", "FL1"]
+# Las ligas que soporta BetSense (analizables de verdad, con datos reales)
+LIGAS_BACKTEST = ["PL", "PD", "BL1", "SA", "FL1", "ELC", "PPL", "BSA", "DED"]
 
 
 def _temporada_actual() -> int:
