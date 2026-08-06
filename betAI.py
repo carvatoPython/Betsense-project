@@ -20,16 +20,18 @@ from auth import auth_bp, init_auth_db
 from indicators import analyze_all_indicators, analyze_tennis_indicators
 from rangos import rangos_bp, cerrar_pick
 from wallet import wallet_bp, init_wallet_db
+from community import community_bp
 
 
 app = Flask(__name__, static_folder='.')
 CORS(app)
-init_db()          # Tablas existentes (predicciones, equipos, sugerencias)
+init_db()          # Tablas existentes (predicciones, equipos, sugerencias) + Comunidad (mismo Base)
 init_auth_db()     # Tablas de usuarios, picks sociales, follows, sesiones
 init_wallet_db()   # Billetera interna y escrow de picks
 app.register_blueprint(auth_bp)    # Endpoints /api/auth/* y /api/feed
 app.register_blueprint(rangos_bp)
 app.register_blueprint(wallet_bp)  # Endpoints /api/wallet/*
+app.register_blueprint(community_bp)  # Endpoints /api/community/* — sección social/matchmaking
 
 # Crea predicciones_ext y cuotas_mercado si no existen (no toca tablas existentes)
 try:

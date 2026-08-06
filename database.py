@@ -326,6 +326,102 @@ class ParametrosActivos(Base):
 
 
 # ══════════════════════════════════════════════════════════════
+# MODELOS — COMUNIDAD ("Buscar partido cerca")
+# ══════════════════════════════════════════════════════════════
+# Sección social/matchmaking, totalmente separada del motor de
+# predicción (model_core.py / betAI.py). Reutiliza usuarios.id como
+# FK pero no toca Equipo/Prediccion — Equipo son equipos reales de
+# la API de fútbol, esto son picados/partidos amateur creados por
+# usuarios.
+
+class PerfilJugador(Base):
+    """Perfil de jugador amateur — 1 a 1 con Usuario."""
+    __tablename__ = "perfiles_jugador"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), unique=True, nullable=False)
+    posicion = Column(String(30))              # ej. "Delantero"
+    pierna_habil = Column(String(15))           # "Derecha" / "Izquierda" / "Ambidiestro"
+    nivel = Column(String(20), default="intermedio")  # principiante/intermedio/avanzado
+    ciudad = Column(String(60))
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    radio_km = Column(Float, default=10.0)
+    disponibilidad = Column(String(120))        # "lunes,miercoles,viernes"
+    busca = Column(String(120))                  # "pachanga,torneo,equipo_fijo"
+    verificado = Column(Boolean, default=False)  # sube de nivel el peso de su reputación
+    creado = Column(DateTime, default=datetime.utcnow)
+    actualizado = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (Index("ix_perfiljugador_ciudad", "ciudad"),)
+
+
+class PartidoComunidad(Base):
+    """Un picado/partido publicado por un organizador, buscando jugadores."""
+    __tablename__ = "partidos_comunidad"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    organizador_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    titulo = Column(String(120))
+    ciudad = Column(String(60), nullable=False)
+    ubicacion_texto = Column(String(150))        # ej. "Cancha Kennedy, sintética"
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    fecha_hora = Column(DateTime, nullable=False)
+    cupos_totales = Column(Integer, nullable=False)
+    nivel_requerido = Column(String(20), default="cualquiera")
+    costo = Column(Float, default=0.0)
+    # abierto → completo (se llenaron los cupos) → jugado (organizador lo cerró,
+    # ahí se habilitan las calificaciones) → cancelado
+    estado = Column(String(15), default="abierto")
+    creado = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_partidocom_ciudad_fecha", "ciudad", "fecha_hora"),
+        Index("ix_partidocom_estado", "estado"),
+    )
+
+
+class InscripcionPartido(Base):
+    """Un jugador confirmado en un partido de comunidad."""
+    __tablename__ = "inscripciones_partido"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    partido_id = Column(Integer, ForeignKey("partidos_comunidad.id"), nullable=False)
+    jugador_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    estado = Column(String(15), default="confirmado")  # confirmado / cancelado
+    # asistio queda NULL hasta que el organizador cierra el partido y pasa lista.
+    # Es el gate del Nivel 1 de calificación: solo quien asistio=True puede calificar/ser calificado.
+    asistio = Column(Boolean, nullable=True)
+    creado = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("partido_id", "jugador_id", name="uq_inscripcion"),)
+
+
+class CalificacionJugador(Base):
+    """
+    Calificación post-partido, Nivel 1 del diseño: solo métricas (sin
+    texto libre), solo entre quienes de verdad jugaron ese partido.
+    """
+    __tablename__ = "calificaciones_jugador"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    partido_id = Column(Integer, ForeignKey("partidos_comunidad.id"), nullable=False)
+    calificador_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    calificado_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
+    trabajo_equipo = Column(Integer, nullable=False)  # 1-5
+    respeto = Column(Integer, nullable=False)          # 1-5
+    puntualidad = Column(Integer, nullable=False)       # 1-5
+    nivel = Column(Integer, nullable=False)              # 1-5
+    volveria_jugar = Column(Boolean, nullable=False)
+    creado = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("partido_id", "calificador_id", "calificado_id", name="uq_calificacion"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 # FUNCIONES DE ACCESO
 # ══════════════════════════════════════════════════════════════
 
@@ -671,6 +767,245 @@ def obtener_historial_backtests(limit: int = 50) -> list:
             "brier_promedio": r.brier_promedio,
             "es_ganador": r.es_ganador,
         } for r in rows]
+    finally:
+        session.close()
+
+
+# ══════════════════════════════════════════════════════════════
+# FUNCIONES — COMUNIDAD
+# ══════════════════════════════════════════════════════════════
+
+def guardar_perfil_jugador(usuario_id: int, **campos) -> dict:
+    """Crea o actualiza el perfil de jugador de un usuario (upsert)."""
+    session = Session()
+    try:
+        perfil = session.query(PerfilJugador).filter_by(usuario_id=usuario_id).first()
+        if not perfil:
+            perfil = PerfilJugador(usuario_id=usuario_id)
+            session.add(perfil)
+        for campo in ("posicion", "pierna_habil", "nivel", "ciudad", "lat", "lng",
+                      "radio_km", "disponibilidad", "busca"):
+            if campo in campos and campos[campo] is not None:
+                setattr(perfil, campo, campos[campo])
+        session.commit()
+        return {
+            "usuario_id": perfil.usuario_id, "posicion": perfil.posicion,
+            "pierna_habil": perfil.pierna_habil, "nivel": perfil.nivel,
+            "ciudad": perfil.ciudad, "radio_km": perfil.radio_km,
+            "disponibilidad": perfil.disponibilidad, "busca": perfil.busca,
+            "verificado": perfil.verificado,
+        }
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error guardando perfil de jugador: {e}")
+        raise
+    finally:
+        session.close()
+
+
+def obtener_perfil_jugador(usuario_id: int) -> dict:
+    session = Session()
+    try:
+        p = session.query(PerfilJugador).filter_by(usuario_id=usuario_id).first()
+        if not p:
+            return None
+        return {
+            "usuario_id": p.usuario_id, "posicion": p.posicion, "pierna_habil": p.pierna_habil,
+            "nivel": p.nivel, "ciudad": p.ciudad, "lat": p.lat, "lng": p.lng,
+            "radio_km": p.radio_km, "disponibilidad": p.disponibilidad, "busca": p.busca,
+            "verificado": p.verificado,
+        }
+    finally:
+        session.close()
+
+
+def crear_partido_comunidad(organizador_id: int, titulo: str, ciudad: str, fecha_hora,
+                              cupos_totales: int, ubicacion_texto: str = None, lat: float = None,
+                              lng: float = None, nivel_requerido: str = "cualquiera",
+                              costo: float = 0.0) -> int:
+    """Publica un picado nuevo buscando jugadores. Devuelve el id creado."""
+    session = Session()
+    try:
+        p = PartidoComunidad(
+            organizador_id=organizador_id, titulo=titulo, ciudad=ciudad,
+            ubicacion_texto=ubicacion_texto, lat=lat, lng=lng, fecha_hora=fecha_hora,
+            cupos_totales=cupos_totales, nivel_requerido=nivel_requerido, costo=costo,
+        )
+        session.add(p)
+        session.commit()
+        return p.id
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error creando partido de comunidad: {e}")
+        raise
+    finally:
+        session.close()
+
+
+def buscar_partidos_cerca(ciudad: str, nivel: str = None, solo_abiertos: bool = True) -> list:
+    """
+    MVP sin geoquery real: filtra por ciudad (+ nivel opcional). Cuando haya
+    volumen y lat/lng poblados de verdad, esto se puede afinar con una
+    fórmula de Haversine sobre radio_km sin cambiar la forma de la función.
+    """
+    session = Session()
+    try:
+        q = session.query(PartidoComunidad).filter(PartidoComunidad.ciudad == ciudad)
+        if solo_abiertos:
+            q = q.filter(PartidoComunidad.estado == "abierto")
+        if nivel and nivel != "cualquiera":
+            q = q.filter(PartidoComunidad.nivel_requerido.in_([nivel, "cualquiera"]))
+        partidos = q.order_by(PartidoComunidad.fecha_hora.asc()).all()
+
+        resultado = []
+        for p in partidos:
+            inscritos = session.query(InscripcionPartido).filter_by(
+                partido_id=p.id, estado="confirmado").count()
+            resultado.append({
+                "id": p.id, "titulo": p.titulo, "ciudad": p.ciudad,
+                "ubicacion_texto": p.ubicacion_texto, "fecha_hora": p.fecha_hora.isoformat(),
+                "cupos_totales": p.cupos_totales, "cupos_disponibles": p.cupos_totales - inscritos,
+                "nivel_requerido": p.nivel_requerido, "costo": p.costo, "estado": p.estado,
+                "organizador_id": p.organizador_id,
+            })
+        return resultado
+    finally:
+        session.close()
+
+
+def inscribirse_partido(partido_id: int, jugador_id: int) -> dict:
+    """Confirma cupo. Devuelve error si ya no hay cupos o el partido no está abierto."""
+    session = Session()
+    try:
+        p = session.get(PartidoComunidad, partido_id)
+        if not p or p.estado != "abierto":
+            return {"ok": False, "error": "Este partido ya no admite inscripciones."}
+
+        existente = session.query(InscripcionPartido).filter_by(
+            partido_id=partido_id, jugador_id=jugador_id).first()
+        if existente and existente.estado == "confirmado":
+            return {"ok": False, "error": "Ya estás inscrito en este partido."}
+
+        inscritos = session.query(InscripcionPartido).filter_by(
+            partido_id=partido_id, estado="confirmado").count()
+        if inscritos >= p.cupos_totales:
+            return {"ok": False, "error": "No quedan cupos disponibles."}
+
+        if existente:
+            existente.estado = "confirmado"
+        else:
+            session.add(InscripcionPartido(partido_id=partido_id, jugador_id=jugador_id))
+
+        if inscritos + 1 >= p.cupos_totales:
+            p.estado = "completo"
+
+        session.commit()
+        return {"ok": True, "cupos_disponibles": p.cupos_totales - (inscritos + 1)}
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error inscribiendo jugador: {e}")
+        return {"ok": False, "error": "Error interno."}
+    finally:
+        session.close()
+
+
+def cerrar_partido(partido_id: int, ids_asistieron: list) -> dict:
+    """
+    El organizador cierra el partido y marca quién asistió de verdad.
+    Esto es el gate del Nivel 1: solo estos jugadores podrán calificarse
+    entre sí después.
+    """
+    session = Session()
+    try:
+        p = session.get(PartidoComunidad, partido_id)
+        if not p:
+            return {"ok": False, "error": "Partido no encontrado."}
+
+        inscripciones = session.query(InscripcionPartido).filter_by(
+            partido_id=partido_id, estado="confirmado").all()
+        for insc in inscripciones:
+            insc.asistio = insc.jugador_id in ids_asistieron
+
+        p.estado = "jugado"
+        session.commit()
+        return {"ok": True, "asistieron": len(ids_asistieron)}
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error cerrando partido: {e}")
+        return {"ok": False, "error": "Error interno."}
+    finally:
+        session.close()
+
+
+def registrar_calificacion(partido_id: int, calificador_id: int, calificado_id: int,
+                             trabajo_equipo: int, respeto: int, puntualidad: int,
+                             nivel: int, volveria_jugar: bool) -> dict:
+    """
+    Nivel 1 del diseño: valida que AMBOS (quien califica y quien es
+    calificado) hayan asistido de verdad a ese partido, y que no se
+    pueda calificar dos veces ni a uno mismo.
+    """
+    if calificador_id == calificado_id:
+        return {"ok": False, "error": "No podés calificarte a vos mismo."}
+
+    session = Session()
+    try:
+        def asistio(jugador_id):
+            insc = session.query(InscripcionPartido).filter_by(
+                partido_id=partido_id, jugador_id=jugador_id, estado="confirmado").first()
+            return bool(insc and insc.asistio)
+
+        if not asistio(calificador_id) or not asistio(calificado_id):
+            return {"ok": False, "error": "Solo pueden calificarse quienes asistieron a este partido."}
+
+        ya_existe = session.query(CalificacionJugador).filter_by(
+            partido_id=partido_id, calificador_id=calificador_id,
+            calificado_id=calificado_id).first()
+        if ya_existe:
+            return {"ok": False, "error": "Ya calificaste a este jugador en este partido."}
+
+        session.add(CalificacionJugador(
+            partido_id=partido_id, calificador_id=calificador_id, calificado_id=calificado_id,
+            trabajo_equipo=trabajo_equipo, respeto=respeto, puntualidad=puntualidad,
+            nivel=nivel, volveria_jugar=volveria_jugar,
+        ))
+        session.commit()
+        return {"ok": True}
+    except Exception as e:
+        session.rollback()
+        print(f"❌ Error registrando calificación: {e}")
+        return {"ok": False, "error": "Error interno."}
+    finally:
+        session.close()
+
+
+def obtener_reputacion_jugador(usuario_id: int) -> dict:
+    """Promedios de calificaciones recibidas + cuántos partidos jugados en Comunidad."""
+    session = Session()
+    try:
+        calificaciones = session.query(CalificacionJugador).filter_by(
+            calificado_id=usuario_id).all()
+        partidos_jugados = session.query(InscripcionPartido).filter_by(
+            jugador_id=usuario_id, asistio=True).count()
+
+        if not calificaciones:
+            return {
+                "partidos_jugados": partidos_jugados, "calificaciones_recibidas": 0,
+                "trabajo_equipo": None, "respeto": None, "puntualidad": None,
+                "nivel": None, "pct_volveria_jugar": None,
+            }
+
+        n = len(calificaciones)
+        return {
+            "partidos_jugados": partidos_jugados,
+            "calificaciones_recibidas": n,
+            "trabajo_equipo": round(sum(c.trabajo_equipo for c in calificaciones) / n, 2),
+            "respeto": round(sum(c.respeto for c in calificaciones) / n, 2),
+            "puntualidad": round(sum(c.puntualidad for c in calificaciones) / n, 2),
+            "nivel": round(sum(c.nivel for c in calificaciones) / n, 2),
+            "pct_volveria_jugar": round(
+                sum(1 for c in calificaciones if c.volveria_jugar) / n * 100, 1),
+        }
     finally:
         session.close()
 
