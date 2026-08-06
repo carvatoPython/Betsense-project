@@ -35,6 +35,7 @@ from database import (
     guardar_perfil_jugador, obtener_perfil_jugador, crear_partido_comunidad,
     buscar_partidos_cerca, inscribirse_partido, cerrar_partido,
     registrar_calificacion, obtener_reputacion_jugador,
+    obtener_partido_detalle, mis_partidos_comunidad,
 )
 
 community_bp = Blueprint("community", __name__, url_prefix="/api/community")
@@ -177,6 +178,22 @@ def api_calificar():
         volveria_jugar=bool(data["volveria_jugar"]),
     )
     return jsonify(resultado), (200 if resultado.get("ok") else 400)
+
+
+@community_bp.route("/partidos/<int:partido_id>", methods=["GET"])
+def api_detalle_partido(partido_id):
+    detalle = obtener_partido_detalle(partido_id)
+    if not detalle:
+        return jsonify({"ok": False, "error": "Partido no encontrado"}), 404
+    return jsonify({"ok": True, "partido": detalle})
+
+
+@community_bp.route("/mis-partidos", methods=["GET"])
+def api_mis_partidos():
+    usuario_id = _usuario_id_actual(request)
+    if not usuario_id:
+        return jsonify({"ok": False, "error": "usuario_id requerido"}), 400
+    return jsonify({"ok": True, **mis_partidos_comunidad(usuario_id)})
 
 
 @community_bp.route("/reputacion/<int:usuario_id>", methods=["GET"])

@@ -1010,9 +1010,69 @@ def obtener_reputacion_jugador(usuario_id: int) -> dict:
         session.close()
 
 
-# ══════════════════════════════════════════════════════════════
-# INICIALIZACIÓN
-# ══════════════════════════════════════════════════════════════
+def obtener_partido_detalle(partido_id: int) -> dict:
+    """
+    Detalle de un partido + su roster (con username/nombre para mostrar en
+    UI). Necesario para que el organizador pase lista al cerrar, y para que
+    los asistentes sepan a quién calificar.
+    """
+    session = Session()
+    try:
+        p = session.get(PartidoComunidad, partido_id)
+        if not p:
+            return None
+
+        inscripciones = session.query(InscripcionPartido).filter_by(
+            partido_id=partido_id, estado="confirmado").all()
+        roster = []
+        for insc in inscripciones:
+            u = session.get(Usuario, insc.jugador_id)
+            roster.append({
+                "usuario_id": insc.jugador_id,
+                "username": u.username if u else "?",
+                "nombre": u.nombre if u else None,
+                "asistio": insc.asistio,
+            })
+
+        return {
+            "id": p.id, "titulo": p.titulo, "ciudad": p.ciudad,
+            "ubicacion_texto": p.ubicacion_texto, "fecha_hora": p.fecha_hora.isoformat(),
+            "cupos_totales": p.cupos_totales, "nivel_requerido": p.nivel_requerido,
+            "costo": p.costo, "estado": p.estado, "organizador_id": p.organizador_id,
+            "roster": roster,
+        }
+    finally:
+        session.close()
+
+
+def mis_partidos_comunidad(usuario_id: int) -> dict:
+    """Partidos que organizo + partidos donde estoy inscrito (para 'Mis partidos')."""
+    session = Session()
+    try:
+        organizados = session.query(PartidoComunidad).filter_by(
+            organizador_id=usuario_id).order_by(PartidoComunidad.fecha_hora.desc()).all()
+
+        inscripciones = session.query(InscripcionPartido).filter_by(
+            jugador_id=usuario_id, estado="confirmado").all()
+        ids_inscrito = [i.partido_id for i in inscripciones]
+        inscrito_en = session.query(PartidoComunidad).filter(
+            PartidoComunidad.id.in_(ids_inscrito)).order_by(
+            PartidoComunidad.fecha_hora.desc()).all() if ids_inscrito else []
+
+        def _fmt(p):
+            return {
+                "id": p.id, "titulo": p.titulo, "ciudad": p.ciudad,
+                "ubicacion_texto": p.ubicacion_texto, "fecha_hora": p.fecha_hora.isoformat(),
+                "cupos_totales": p.cupos_totales, "estado": p.estado,
+                "organizador_id": p.organizador_id,
+            }
+
+        return {
+            "organizados": [_fmt(p) for p in organizados],
+            "inscrito_en": [_fmt(p) for p in inscrito_en],
+        }
+    finally:
+        session.close()
 
 if __name__ == "__main__":
     init_db()

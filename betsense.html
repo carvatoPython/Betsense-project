@@ -7141,15 +7141,360 @@ function closeComunidad() { _navCloseAll(); }
  
 function comTab(tab) {
   _comTab = tab;
-  ['feed','leaderboard','tipsters'].forEach(t => {
+  ['feed','leaderboard','tipsters','jugar'].forEach(t => {
     document.getElementById('ctab-' + t).classList.toggle('active', t === tab);
     document.getElementById('com-panel-' + t).style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'feed' && _feedPage === 1) comCargarFeed(false);
   if (tab === 'leaderboard') comCargarLeaderboard();
   if (tab === 'tipsters')    comCargarTipsters();
+  if (tab === 'jugar')       comJugarInit();
 }
- 
+
+// ══════════════════════════════════════════════════════════════
+// TAB "JUGAR" — matchmaking amateur (Comunidad)
+// ══════════════════════════════════════════════════════════════
+let _comMiPerfil = null;
+let _comCalifCola = [];   // cola de jugadores por calificar tras cerrar un partido
+let _comCalifIdx = 0;
+let _comCalifPartidoId = null;
+let _comCalifVolveria = true;
+let _comCerrarPartidoId = null;
+
+function comCerrarModal(id) {
+  document.getElementById(id).style.display = 'none';
+}
+
+function comMiUsuarioId() {
+  return (AUTH && AUTH.user && AUTH.user.id) ? AUTH.user.id : null;
+}
+
+async function comJugarInit() {
+  const uid = comMiUsuarioId();
+  if (!uid) {
+    document.getElementById('com-jugar-perfil-resumen').textContent = 'Iniciá sesión para configurar tu perfil de jugador';
+    document.getElementById('com-mis-partidos').innerHTML = '<div class="feed-loading">Iniciá sesión para ver tus partidos</div>';
+    return;
+  }
+  document.getElementById('com-jugar-avatar').textContent = (AUTH.user.username || '?').slice(0,2).toUpperCase();
+
+  try {
+    const r = await fetch(`${SERVER}/api/community/perfil/${uid}`);
+    const data = await r.json();
+    if (data.ok) {
+      _comMiPerfil = data.perfil;
+      document.getElementById('com-jugar-perfil-resumen').textContent =
+        `${data.perfil.posicion || 'Sin posición'} · ${data.perfil.nivel} · ${data.perfil.ciudad || 'sin ciudad'} — Editar →`;
+      if (data.perfil.ciudad) {
+        document.getElementById('com-jugar-ciudad').value = data.perfil.ciudad;
+        comBuscarPartidos();
+      }
+    } else {
+      document.getElementById('com-jugar-perfil-resumen').textContent = 'Configurá tu perfil de jugador →';
+    }
+  } catch (e) {
+    console.error('Error cargando perfil de jugador:', e);
+  }
+
+  comCargarMisPartidos();
+}
+
+// ── PERFIL ───────────────────────────────────────────────────
+function comAbrirPerfil() {
+  if (!comMiUsuarioId()) { alert('Iniciá sesión primero.'); return; }
+  if (_comMiPerfil) {
+    document.getElementById('com-perfil-posicion').value = _comMiPerfil.posicion || '';
+    document.getElementById('com-perfil-pierna').value = _comMiPerfil.pierna_habil || '';
+    document.getElementById('com-perfil-nivel').value = _comMiPerfil.nivel || 'intermedio';
+    document.getElementById('com-perfil-ciudad').value = _comMiPerfil.ciudad || '';
+    document.getElementById('com-perfil-disponibilidad').value = _comMiPerfil.disponibilidad || '';
+    document.getElementById('com-perfil-busca').value = _comMiPerfil.busca || '';
+  }
+  document.getElementById('com-perfil-modal-bg').style.display = 'flex';
+}
+
+async function comGuardarPerfil() {
+  const uid = comMiUsuarioId();
+  const msg = document.getElementById('com-perfil-msg');
+  const body = {
+    usuario_id: uid,
+    posicion: document.getElementById('com-perfil-posicion').value,
+    pierna_habil: document.getElementById('com-perfil-pierna').value,
+    nivel: document.getElementById('com-perfil-nivel').value,
+    ciudad: document.getElementById('com-perfil-ciudad').value,
+    disponibilidad: document.getElementById('com-perfil-disponibilidad').value,
+    busca: document.getElementById('com-perfil-busca').value,
+  };
+  try {
+    const r = await fetch(`${SERVER}/api/community/perfil`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (data.ok) {
+      _comMiPerfil = data.perfil;
+      msg.style.color = 'var(--green)'; msg.textContent = 'Perfil guardado ✓';
+      setTimeout(() => comCerrarModal('com-perfil-modal-bg'), 700);
+      comJugarInit();
+    } else {
+      msg.style.color = '#ff4466'; msg.textContent = data.error || 'Error guardando el perfil';
+    }
+  } catch (e) {
+    msg.style.color = '#ff4466'; msg.textContent = 'Error de conexión';
+  }
+}
+
+// ── PUBLICAR PARTIDO ─────────────────────────────────────────
+function comAbrirPublicar() {
+  if (!comMiUsuarioId()) { alert('Iniciá sesión primero.'); return; }
+  document.getElementById('com-publicar-modal-bg').style.display = 'flex';
+}
+
+async function comPublicarPartido() {
+  const uid = comMiUsuarioId();
+  const msg = document.getElementById('com-pub-msg');
+  const fechaInput = document.getElementById('com-pub-fecha').value;
+  if (!fechaInput) { msg.style.color = '#ff4466'; msg.textContent = 'Elegí fecha y hora'; return; }
+
+  const body = {
+    usuario_id: uid,
+    titulo: document.getElementById('com-pub-titulo').value,
+    ciudad: document.getElementById('com-pub-ciudad').value,
+    ubicacion_texto: document.getElementById('com-pub-ubicacion').value,
+    fecha_hora: fechaInput,
+    cupos_totales: parseInt(document.getElementById('com-pub-cupos').value || '0', 10),
+    nivel_requerido: document.getElementById('com-pub-nivel').value,
+    costo: parseFloat(document.getElementById('com-pub-costo').value || '0'),
+  };
+  try {
+    const r = await fetch(`${SERVER}/api/community/partidos`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (data.ok) {
+      msg.style.color = 'var(--green)'; msg.textContent = 'Partido publicado ✓';
+      setTimeout(() => comCerrarModal('com-publicar-modal-bg'), 700);
+      document.getElementById('com-jugar-ciudad').value = body.ciudad;
+      comBuscarPartidos();
+      comCargarMisPartidos();
+    } else {
+      msg.style.color = '#ff4466'; msg.textContent = data.error || 'Error publicando el partido';
+    }
+  } catch (e) {
+    msg.style.color = '#ff4466'; msg.textContent = 'Error de conexión';
+  }
+}
+
+// ── BUSCAR / UNIRSE ──────────────────────────────────────────
+function comCardPartido(p, accionHtml) {
+  const fecha = new Date(p.fecha_hora);
+  const fechaStr = fecha.toLocaleDateString('es-CO', {weekday:'short', day:'numeric', month:'short'}) +
+                    ' · ' + fecha.toLocaleTimeString('es-CO', {hour:'2-digit', minute:'2-digit'});
+  const costoStr = p.costo > 0 ? `$${Number(p.costo).toLocaleString('es-CO')}` : 'Gratis';
+  return `
+    <div style="background:var(--bg3); border:1px solid var(--border); border-radius:14px; padding:16px">
+      <div style="font-family:'Orbitron',monospace; font-size:13px; color:var(--text); margin-bottom:6px">${p.titulo || 'Partido'}</div>
+      <div style="font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--muted); line-height:1.9">
+        📍 ${p.ubicacion_texto || p.ciudad}<br>
+        🕒 ${fechaStr}<br>
+        👥 ${p.cupos_disponibles !== undefined ? p.cupos_disponibles + '/' + p.cupos_totales + ' cupos libres' : p.cupos_totales + ' cupos'}<br>
+        📶 Nivel: ${p.nivel_requerido || 'cualquiera'} · 💵 ${costoStr}
+      </div>
+      <div style="margin-top:12px">${accionHtml}</div>
+    </div>`;
+}
+
+async function comBuscarPartidos() {
+  const ciudad = document.getElementById('com-jugar-ciudad').value.trim();
+  const grid = document.getElementById('com-jugar-grid');
+  if (!ciudad) { grid.innerHTML = '<div class="feed-loading">Escribí una ciudad para buscar</div>'; return; }
+  grid.innerHTML = '<div class="feed-loading">Buscando partidos...</div>';
+  try {
+    const r = await fetch(`${SERVER}/api/community/partidos?ciudad=${encodeURIComponent(ciudad)}`);
+    const data = await r.json();
+    if (!data.ok || !data.partidos.length) {
+      grid.innerHTML = '<div class="feed-loading">No hay partidos abiertos en esa ciudad todavía — ¡publicá el primero!</div>';
+      return;
+    }
+    grid.innerHTML = data.partidos.map(p => comCardPartido(p, `
+      <button onclick="comUnirme(${p.id})"
+        style="width:100%; padding:9px; border-radius:9px; border:none; background:linear-gradient(135deg,#8a2be2,#ff00ff); color:#fff; font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+        UNIRME
+      </button>`)).join('');
+  } catch (e) {
+    grid.innerHTML = '<div class="feed-loading">Error buscando partidos</div>';
+  }
+}
+
+async function comUnirme(partidoId) {
+  const uid = comMiUsuarioId();
+  if (!uid) { alert('Iniciá sesión primero.'); return; }
+  try {
+    const r = await fetch(`${SERVER}/api/community/partidos/${partidoId}/inscribirse`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({usuario_id: uid})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      comBuscarPartidos();
+      comCargarMisPartidos();
+    } else {
+      alert(data.error || 'No se pudo unir al partido');
+    }
+  } catch (e) {
+    alert('Error de conexión');
+  }
+}
+
+// ── MIS PARTIDOS (organizados / inscrito) ────────────────────
+async function comCargarMisPartidos() {
+  const uid = comMiUsuarioId();
+  const cont = document.getElementById('com-mis-partidos');
+  if (!uid) return;
+  cont.innerHTML = '<div class="feed-loading">Cargando tus partidos...</div>';
+  try {
+    const r = await fetch(`${SERVER}/api/community/mis-partidos?usuario_id=${uid}`);
+    const data = await r.json();
+    if (!data.ok) { cont.innerHTML = '<div class="feed-loading">Error cargando tus partidos</div>'; return; }
+
+    const cards = [];
+    data.organizados.forEach(p => {
+      let accion = `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted)">Organizás este partido</span>`;
+      if (p.estado === 'completo' || p.estado === 'abierto') {
+        accion = `<button onclick="comAbrirCerrar(${p.id})"
+          style="width:100%; padding:9px; border-radius:9px; border:1px solid rgba(255,204,0,0.4); background:rgba(255,204,0,0.1); color:#ffcc00; font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+          CERRAR Y PASAR LISTA
+        </button>`;
+      } else if (p.estado === 'jugado') {
+        accion = `<button onclick="comAbrirCalificar(${p.id})"
+          style="width:100%; padding:9px; border-radius:9px; border:1px solid rgba(0,255,170,0.4); background:rgba(0,255,170,0.1); color:var(--green); font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+          CALIFICAR JUGADORES
+        </button>`;
+      }
+      cards.push(comCardPartido(p, accion + `<div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);margin-top:6px">Como organizador</div>`));
+    });
+    data.inscrito_en.forEach(p => {
+      let accion = `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted)">Estado: ${p.estado}</span>`;
+      if (p.estado === 'jugado') {
+        accion = `<button onclick="comAbrirCalificar(${p.id})"
+          style="width:100%; padding:9px; border-radius:9px; border:1px solid rgba(0,255,170,0.4); background:rgba(0,255,170,0.1); color:var(--green); font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+          CALIFICAR JUGADORES
+        </button>`;
+      }
+      cards.push(comCardPartido(p, accion + `<div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);margin-top:6px">Inscrito</div>`));
+    });
+
+    cont.innerHTML = cards.length ? cards.join('') : '<div class="feed-loading">Todavía no organizás ni te uniste a ningún partido</div>';
+  } catch (e) {
+    cont.innerHTML = '<div class="feed-loading">Error cargando tus partidos</div>';
+  }
+}
+
+// ── CERRAR PARTIDO (pasar lista) ──────────────────────────────
+async function comAbrirCerrar(partidoId) {
+  _comCerrarPartidoId = partidoId;
+  const r = await fetch(`${SERVER}/api/community/partidos/${partidoId}`);
+  const data = await r.json();
+  if (!data.ok) { alert('No se pudo cargar el partido'); return; }
+
+  const lista = document.getElementById('com-cerrar-lista');
+  lista.innerHTML = data.partido.roster.map(j => `
+    <label style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; background:rgba(255,255,255,0.03); cursor:pointer">
+      <input type="checkbox" class="com-cerrar-check" value="${j.usuario_id}" checked>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text)">${j.nombre || j.username}</span>
+    </label>`).join('') || '<div style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--muted)">Nadie se inscribió a este partido.</div>';
+
+  document.getElementById('com-cerrar-modal-bg').style.display = 'flex';
+}
+
+async function comConfirmarCierre() {
+  const ids = Array.from(document.querySelectorAll('.com-cerrar-check:checked')).map(c => parseInt(c.value, 10));
+  const msg = document.getElementById('com-cerrar-msg');
+  try {
+    const r = await fetch(`${SERVER}/api/community/partidos/${_comCerrarPartidoId}/cerrar`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ids_asistieron: ids})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      msg.style.color = 'var(--green)'; msg.textContent = `Partido cerrado — ${data.asistieron} jugadores confirmados ✓`;
+      setTimeout(() => { comCerrarModal('com-cerrar-modal-bg'); comCargarMisPartidos(); }, 900);
+    } else {
+      msg.style.color = '#ff4466'; msg.textContent = data.error || 'Error cerrando el partido';
+    }
+  } catch (e) {
+    msg.style.color = '#ff4466'; msg.textContent = 'Error de conexión';
+  }
+}
+
+// ── CALIFICAR (cola de jugadores, uno a la vez) ───────────────
+async function comAbrirCalificar(partidoId) {
+  const uid = comMiUsuarioId();
+  const r = await fetch(`${SERVER}/api/community/partidos/${partidoId}`);
+  const data = await r.json();
+  if (!data.ok) { alert('No se pudo cargar el partido'); return; }
+
+  _comCalifPartidoId = partidoId;
+  _comCalifCola = data.partido.roster.filter(j => j.asistio && j.usuario_id !== uid);
+  _comCalifIdx = 0;
+
+  if (!_comCalifCola.length) {
+    alert('No hay jugadores confirmados para calificar en este partido todavía.');
+    return;
+  }
+  comMostrarCalificarActual();
+  document.getElementById('com-calificar-modal-bg').style.display = 'flex';
+}
+
+function comMostrarCalificarActual() {
+  const j = _comCalifCola[_comCalifIdx];
+  document.getElementById('com-calif-nombre').textContent = j.nombre || j.username;
+  document.getElementById('com-calif-progreso').textContent = _comCalifIdx + 1;
+  document.getElementById('com-calif-total').textContent = _comCalifCola.length;
+  document.getElementById('com-calif-trabajo').value = 3;
+  document.getElementById('com-calif-respeto').value = 3;
+  document.getElementById('com-calif-puntualidad').value = 3;
+  document.getElementById('com-calif-nivel').value = 3;
+  comSetVolveria(true);
+  document.getElementById('com-calif-msg').textContent = '';
+}
+
+function comSetVolveria(si) {
+  _comCalifVolveria = si;
+  document.getElementById('com-calif-volveria-si').style.opacity = si ? '1' : '0.4';
+  document.getElementById('com-calif-volveria-no').style.opacity = si ? '0.4' : '1';
+}
+
+async function comEnviarCalificacion() {
+  const uid = comMiUsuarioId();
+  const j = _comCalifCola[_comCalifIdx];
+  const msg = document.getElementById('com-calif-msg');
+  const body = {
+    usuario_id: uid,
+    partido_id: _comCalifPartidoId,
+    calificado_id: j.usuario_id,
+    trabajo_equipo: parseInt(document.getElementById('com-calif-trabajo').value, 10),
+    respeto: parseInt(document.getElementById('com-calif-respeto').value, 10),
+    puntualidad: parseInt(document.getElementById('com-calif-puntualidad').value, 10),
+    nivel: parseInt(document.getElementById('com-calif-nivel').value, 10),
+    volveria_jugar: _comCalifVolveria,
+  };
+  try {
+    const r = await fetch(`${SERVER}/api/community/calificaciones`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (!data.ok) { msg.style.color = '#ff4466'; msg.textContent = data.error || 'Error calificando'; return; }
+
+    _comCalifIdx++;
+    if (_comCalifIdx < _comCalifCola.length) {
+      comMostrarCalificarActual();
+    } else {
+      msg.style.color = 'var(--green)'; msg.textContent = '¡Listo, calificaste a todos! ✓';
+      setTimeout(() => comCerrarModal('com-calificar-modal-bg'), 900);
+    }
+  } catch (e) {
+    msg.style.color = '#ff4466'; msg.textContent = 'Error de conexión';
+  }
+}
+
 // ── Avatar del publicador ─────────────────────────────────────
 function comActualizarAvatarPub() {
   const av = document.getElementById('com-pub-avatar');
@@ -7837,6 +8182,7 @@ async function comCargarTipsters() {
       <button class="com-tab active" id="ctab-feed"       onclick="comTab('feed')">📰 Feed de Picks</button>
       <button class="com-tab"        id="ctab-leaderboard" onclick="comTab('leaderboard')">🏆 Ranking Mensual</button>
       <button class="com-tab"        id="ctab-tipsters"   onclick="comTab('tipsters')">⭐ Top Tipsters</button>
+      <button class="com-tab"        id="ctab-jugar"       onclick="comTab('jugar')">⚽ Jugar</button>
     </div>
  
     <!-- ── TAB: FEED ───────────────────── -->
@@ -7984,7 +8330,182 @@ async function comCargarTipsters() {
         <div class="feed-loading">Cargando tipsters...</div>
       </div>
     </div>
- 
+
+    <!-- ── TAB: JUGAR (matchmaking amateur) ───────────────────── -->
+    <div id="com-panel-jugar" style="display:none">
+
+      <!-- Mi perfil de jugador -->
+      <div class="com-publish-bar" onclick="comAbrirPerfil()" style="margin-bottom:14px">
+        <div class="com-pub-avatar" id="com-jugar-avatar">?</div>
+        <div class="com-pub-placeholder" id="com-jugar-perfil-resumen">Configurá tu perfil de jugador →</div>
+      </div>
+
+      <!-- Barra: buscar por ciudad + publicar partido -->
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px">
+        <input id="com-jugar-ciudad" type="text" placeholder="Ciudad (ej. Bogotá)"
+          style="flex:1; min-width:160px; padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:rgba(8,8,22,0.9); color:var(--text); font-family:'JetBrains Mono',monospace; font-size:12px; outline:none"
+          onkeydown="if(event.key==='Enter') comBuscarPartidos()">
+        <button onclick="comBuscarPartidos()"
+          style="padding:10px 18px; border-radius:10px; border:1px solid rgba(0,162,255,0.4); background:rgba(0,162,255,0.1); color:#00a2ff; font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+          🔍 Buscar
+        </button>
+        <button onclick="comAbrirPublicar()"
+          style="padding:10px 18px; border-radius:10px; border:1px solid rgba(255,0,255,0.4); background:linear-gradient(135deg, rgba(138,43,226,0.15), rgba(255,0,255,0.1)); color:#ff00ff; font-family:'Orbitron',monospace; font-size:11px; font-weight:700; cursor:pointer">
+          ⚽ Publicar partido
+        </button>
+      </div>
+
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:12px;letter-spacing:1px">
+        PARTIDOS DISPONIBLES
+      </div>
+      <div id="com-jugar-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; margin-bottom:28px">
+        <div class="feed-loading">Buscá una ciudad para ver partidos ↑</div>
+      </div>
+
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:12px;letter-spacing:1px">
+        MIS PARTIDOS
+      </div>
+      <div id="com-mis-partidos" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px">
+        <div class="feed-loading">Iniciá sesión para ver tus partidos</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── MODAL: MI PERFIL DE JUGADOR ────────────────────────── -->
+<div id="com-perfil-modal-bg" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; align-items:center; justify-content:center">
+  <div style="width:min(420px,92vw); background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:22px">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px">
+      <div style="font-family:'Orbitron',monospace; font-size:14px; color:#ff00ff">MI PERFIL DE JUGADOR</div>
+      <button onclick="comCerrarModal('com-perfil-modal-bg')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:10px">ESC ✕</button>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:10px">
+      <select id="com-perfil-posicion" style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+        <option value="">Posición...</option>
+        <option value="Portero">Portero</option>
+        <option value="Defensa">Defensa</option>
+        <option value="Mediocampista">Mediocampista</option>
+        <option value="Delantero">Delantero</option>
+      </select>
+      <select id="com-perfil-pierna" style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+        <option value="">Pierna hábil...</option>
+        <option value="Derecha">Derecha</option>
+        <option value="Izquierda">Izquierda</option>
+        <option value="Ambidiestro">Ambidiestro</option>
+      </select>
+      <select id="com-perfil-nivel" style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+        <option value="principiante">Nivel: principiante</option>
+        <option value="intermedio" selected>Nivel: intermedio</option>
+        <option value="avanzado">Nivel: avanzado</option>
+      </select>
+      <input id="com-perfil-ciudad" type="text" placeholder="Ciudad"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-perfil-disponibilidad" type="text" placeholder="Disponibilidad (ej. lunes,miercoles,viernes)"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-perfil-busca" type="text" placeholder="Buscás (ej. pachanga,torneo,equipo_fijo)"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <button onclick="comGuardarPerfil()"
+        style="margin-top:6px; padding:11px; border-radius:10px; border:none; background:linear-gradient(135deg,#8a2be2,#ff00ff); color:#fff; font-family:'Orbitron',monospace; font-size:12px; font-weight:700; cursor:pointer">
+        GUARDAR PERFIL
+      </button>
+      <div id="com-perfil-msg" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted)"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODAL: PUBLICAR PARTIDO ────────────────────────────── -->
+<div id="com-publicar-modal-bg" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; align-items:center; justify-content:center">
+  <div style="width:min(420px,92vw); background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:22px">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px">
+      <div style="font-family:'Orbitron',monospace; font-size:14px; color:#ff00ff">PUBLICAR PARTIDO</div>
+      <button onclick="comCerrarModal('com-publicar-modal-bg')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:10px">ESC ✕</button>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:10px">
+      <input id="com-pub-titulo" type="text" placeholder="Título (ej. Picado viernes)"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-pub-ciudad" type="text" placeholder="Ciudad"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-pub-ubicacion" type="text" placeholder="Cancha / ubicación"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-pub-fecha" type="datetime-local"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <input id="com-pub-cupos" type="number" min="2" placeholder="Cupos totales (ej. 10)"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <select id="com-pub-nivel" style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+        <option value="cualquiera">Nivel: cualquiera</option>
+        <option value="principiante">Nivel: principiante</option>
+        <option value="intermedio">Nivel: intermedio</option>
+        <option value="avanzado">Nivel: avanzado</option>
+      </select>
+      <input id="com-pub-costo" type="number" min="0" placeholder="Costo por persona (COP, 0 si es gratis)"
+        style="padding:9px 12px;border-radius:8px;border:1px solid var(--border);background:rgba(8,8,22,0.9);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px">
+      <button onclick="comPublicarPartido()"
+        style="margin-top:6px; padding:11px; border-radius:10px; border:none; background:linear-gradient(135deg,#8a2be2,#ff00ff); color:#fff; font-family:'Orbitron',monospace; font-size:12px; font-weight:700; cursor:pointer">
+        PUBLICAR
+      </button>
+      <div id="com-pub-msg" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted)"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── MODAL: CERRAR PARTIDO (pasar lista) ────────────────── -->
+<div id="com-cerrar-modal-bg" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; align-items:center; justify-content:center">
+  <div style="width:min(420px,92vw); background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:22px">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+      <div style="font-family:'Orbitron',monospace; font-size:14px; color:#ff00ff">¿QUIÉN JUGÓ REALMENTE?</div>
+      <button onclick="comCerrarModal('com-cerrar-modal-bg')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:10px">ESC ✕</button>
+    </div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:14px">
+      Marcá solo a quienes SÍ asistieron — es lo que habilita las calificaciones.
+    </div>
+    <div id="com-cerrar-lista" style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px"></div>
+    <button onclick="comConfirmarCierre()"
+      style="width:100%; padding:11px; border-radius:10px; border:none; background:linear-gradient(135deg,#8a2be2,#ff00ff); color:#fff; font-family:'Orbitron',monospace; font-size:12px; font-weight:700; cursor:pointer">
+      CONFIRMAR ASISTENCIA
+    </button>
+    <div id="com-cerrar-msg" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);margin-top:8px"></div>
+  </div>
+</div>
+
+<!-- ── MODAL: CALIFICAR JUGADOR ───────────────────────────── -->
+<div id="com-calificar-modal-bg" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:200; align-items:center; justify-content:center">
+  <div style="width:min(420px,92vw); background:var(--bg2); border:1px solid var(--border); border-radius:16px; padding:22px">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px">
+      <div style="font-family:'Orbitron',monospace; font-size:14px; color:#ff00ff">CALIFICAR A <span id="com-calif-nombre">—</span></div>
+      <button onclick="comCerrarModal('com-calificar-modal-bg')" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:10px">ESC ✕</button>
+    </div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--muted);margin-bottom:14px">
+      Jugador <span id="com-calif-progreso">1</span> de <span id="com-calif-total">1</span> — solo métricas, sin comentarios
+    </div>
+    <div style="display:flex; flex-direction:column; gap:12px">
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:4px">Trabajo en equipo</div>
+        <input id="com-calif-trabajo" type="range" min="1" max="5" value="3" style="width:100%">
+      </div>
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:4px">Respeto</div>
+        <input id="com-calif-respeto" type="range" min="1" max="5" value="3" style="width:100%">
+      </div>
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:4px">Puntualidad</div>
+        <input id="com-calif-puntualidad" type="range" min="1" max="5" value="3" style="width:100%">
+      </div>
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-bottom:4px">Nivel de juego</div>
+        <input id="com-calif-nivel" type="range" min="1" max="5" value="3" style="width:100%">
+      </div>
+      <div style="display:flex; align-items:center; gap:10px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted)">¿Volverías a jugar con él/ella?</span>
+        <button id="com-calif-volveria-si" onclick="comSetVolveria(true)" style="padding:6px 14px;border-radius:8px;border:1px solid rgba(0,255,170,0.4);background:rgba(0,255,170,0.15);color:var(--green);font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">Sí</button>
+        <button id="com-calif-volveria-no" onclick="comSetVolveria(false)" style="padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer">No</button>
+      </div>
+      <button onclick="comEnviarCalificacion()"
+        style="margin-top:4px; padding:11px; border-radius:10px; border:none; background:linear-gradient(135deg,#8a2be2,#ff00ff); color:#fff; font-family:'Orbitron',monospace; font-size:12px; font-weight:700; cursor:pointer">
+        SIGUIENTE →
+      </button>
+      <div id="com-calif-msg" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted)"></div>
+    </div>
   </div>
 </div>
 
